@@ -69,8 +69,8 @@ if "processing_complete" not in st.session_state:
 
 def main():
     # Header
-    st.markdown('<div class="main-header">📊 Product Data Intelligence Platform</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Scrape, analyze, and gain competitive intelligence from product data</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📊 Market Price - Intelligence Platform</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Scrape, analyze, and gain competitive intelligence for Protection products</div>', unsafe_allow_html=True)
     
     # Check API key
     if not ANTHROPIC_API_KEY:
@@ -282,7 +282,7 @@ def main():
     st.markdown(
         """
         <div style='text-align: center; color: #666; margin-top: 20px;'>
-            <p>Product Data Intelligence Platform | Powered by Claude AI</p>
+            <p>Market Price - Intelligence Platform | Yoga Manickavasakam</p>
         </div>
         """,
         unsafe_allow_html=True
