@@ -49,7 +49,7 @@ class ScraperAgent:
             self.errors.append((url, error_msg))
             return None
     
-    def scrape_single_url(self, url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    def scrape_single_url(self, url: str, competitor_name: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """
         Scrape a single URL and extract product data.
         Returns tuple of (products_data, error_message)
@@ -72,10 +72,12 @@ class ScraperAgent:
             
             # Validate extracted data
             validated_products = validate_extracted_data(products)
-            
-            # Add source URL to each product
+
+            # Add source URL and competitor name to each product
             for product in validated_products:
                 product["source_url"] = url
+                if competitor_name:
+                    product["competitor"] = competitor_name
             
             logger.info(f"Successfully extracted {len(validated_products)} products from {url}")
             return {"url": url, "products": validated_products}, None
@@ -85,7 +87,7 @@ class ScraperAgent:
             logger.error(error_msg)
             return None, error_msg
     
-    def scrape_multiple_urls(self, urls: List[str], progress_callback=None) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
+    def scrape_multiple_urls(self, urls: List[str], progress_callback=None, url_to_competitor: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
         """
         Scrape multiple URLs and aggregate results.
         Returns tuple of (all_products_by_url, errors)
@@ -98,7 +100,11 @@ class ScraperAgent:
             if progress_callback:
                 progress_callback(url, index, len(urls))
             
-            result, error = self.scrape_single_url(url)
+            competitor_name = None
+            if url_to_competitor:
+                competitor_name = url_to_competitor.get(url)
+
+            result, error = self.scrape_single_url(url, competitor_name=competitor_name)
             
             if result:
                 all_results[url] = result["products"]

@@ -21,41 +21,93 @@ st.set_page_config(
     page_title=APP_TITLE,
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom CSS
-st.markdown("""
+# Global theme & layout CSS
+st.markdown(
+    """
 <style>
-    .main-header {
-        color: #1f77b4;
-        font-size: 2.5em;
-        font-weight: bold;
-        margin-bottom: 10px;
+    :root {
+        --primary-pink: #d03e9d;
+        --primary-navy: #08216b;
+        --bg-soft: #f5f7fb;
+        --card-bg: #ffffff;
+        --accent-soft: #fbe7f4;
+        --border-subtle: rgba(8, 33, 107, 0.06);
+        --text-muted: #4b5878;
     }
-    .sub-header {
-        color: #666;
-        font-size: 1.1em;
-        margin-bottom: 20px;
+
+    html, body, [data-testid="stApp"] {
+        background: radial-gradient(circle at top left, #fbe7f4 0, #f5f7fb 35%, #ffffff 100%);
     }
-    .success-box {
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        color: #155724;
-        padding: 12px;
-        border-radius: 5px;
-        margin: 10px 0;
+
+    .app-header-title {
+        color: var(--primary-navy);
+        font-size: 2.2rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        margin-bottom: 0.25rem;
     }
-    .error-box {
-        background-color: #f8d7da;
-        border: 1px solid #f5c6cb;
-        color: #721c24;
-        padding: 12px;
-        border-radius: 5px;
-        margin: 10px 0;
+
+    .app-header-subtitle {
+        color: var(--text-muted);
+        font-size: 0.98rem;
+        max-width: 34rem;
+        line-height: 1.5;
+        margin-bottom: 0.5rem;
+    }
+
+    .brand-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.15rem 0.75rem;
+        border-radius: 999px;
+        background: rgba(208, 62, 157, 0.08);
+        color: var(--primary-pink);
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        margin-bottom: 0.5rem;
+    }
+
+    /* Tweak tabs to feel more like an analytics workspace */
+    [data-testid="stTabs"] button {
+        font-weight: 600;
+        border-radius: 999px !important;
+        padding: 0.4rem 1.2rem !important;
+    }
+
+    [data-testid="stTabs"] button[aria-selected="true"] {
+        background: linear-gradient(90deg, var(--primary-navy), var(--primary-pink));
+        color: #ffffff !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: var(--primary-navy);
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: var(--text-muted);
+    }
+
+    /* Softer data frame background */
+    [data-testid="stDataFrame"] {
+        border-radius: 0.5rem;
+        border: 1px solid var(--border-subtle);
+        background-color: var(--card-bg);
+    }
+
+    .section-header {
+        font-weight: 600;
+        color: var(--primary-navy);
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # Initialize session state
 if "scraper_agent" not in st.session_state:
@@ -68,9 +120,27 @@ if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
 
 def main():
-    # Header
-    st.markdown('<div class="main-header">📊 Market Price - Intelligence Platform</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Scrape, analyze, and gain competitive intelligence for Protection products</div>', unsafe_allow_html=True)
+    # Header with branding
+    with st.container():
+        left, right = st.columns([3, 2])
+        with left:
+            if os.path.exists("logo.svg"):
+                st.image("logo.svg", width=170)
+            st.markdown(
+                "<div class='brand-pill'>AI workspace</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<div class='app-header-title'>AI Powered Competitor Intelligence</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                "<div class='app-header-subtitle'>Scrape, normalise and benchmark competitor propositions, pricing and coverage with an AI-assisted analysis environment.</div>",
+                unsafe_allow_html=True,
+            )
+        with right:
+            if os.path.exists("things.png"):
+                st.image("things.png", width ="content")
     
     # Check API key
     if not ANTHROPIC_API_KEY:
@@ -91,12 +161,13 @@ def main():
             uploaded_file = st.file_uploader(
                 "Upload a CSV file with URLs",
                 type="csv",
-                help="CSV should have a 'url' column with product page URLs"
+                help="CSV should have a 'url' column with product page URLs and an optional 'competitor' column"
             )
             
+            csv_rows = None
             if uploaded_file:
-                urls = parse_csv_urls(uploaded_file)
-                st.success(f"✓ Parsed {len(urls)} URLs from CSV")
+                csv_rows = parse_csv_urls(uploaded_file)
+                st.success(f"✓ Parsed {len(csv_rows)} rows from CSV")
         
         with col2:
             st.subheader("Option 2: Paste URLs as Text")
@@ -106,37 +177,57 @@ def main():
                 placeholder="https://example.com/page1\nhttps://example.com/page2\n..."
             )
             
+            text_urls = None
             if text_input.strip():
-                urls = parse_text_urls(text_input)
-                st.success(f"✓ Parsed {len(urls)} URLs from text")
+                text_urls = parse_text_urls(text_input)
+                st.success(f"✓ Parsed {len(text_urls)} URLs from text")
         
-        # Get URLs from whichever input was provided
-        urls = None
-        if uploaded_file:
-            urls = parse_csv_urls(uploaded_file)
-        elif text_input.strip():
-            urls = parse_text_urls(text_input)
-        
-        if urls:
-            # Validate URLs
+        # Prefer CSV workflow when a file is uploaded; otherwise fall back to text URLs
+        if uploaded_file and csv_rows:
+            # Validate URLs from CSV
             st.subheader("URL Validation")
-            valid_urls = [u for u in urls if validate_url(u)]
-            invalid_urls = [u for u in urls if not validate_url(u)]
+            valid_rows = [row for row in csv_rows if validate_url(row["url"])]
+            invalid_rows = [row for row in csv_rows if not validate_url(row["url"])]
             
             col1, col2 = st.columns(2)
             with col1:
-                st.success(f"✓ Valid URLs: {len(valid_urls)}")
+                st.success(f"✓ Valid URLs: {len(valid_rows)}")
             with col2:
-                if invalid_urls:
-                    st.warning(f"⚠ Invalid URLs: {len(invalid_urls)}")
+                if invalid_rows:
+                    st.warning(f"⚠ Invalid URLs: {len(invalid_rows)}")
                     with st.expander("Show invalid URLs"):
-                        for url in invalid_urls:
-                            st.text(url)
-            
-            # Deduplicate URLs
-            final_urls = deduplicate_urls(valid_urls)
-            st.info(f"Processing {len(final_urls)} unique URLs")
-            
+                        for row in invalid_rows:
+                            st.text(row["url"])
+
+            # Deduplicate by URL while preserving competitor names
+            seen = set()
+            final_rows = []
+            for row in valid_rows:
+                url_val = row["url"]
+                if url_val not in seen:
+                    seen.add(url_val)
+                    final_rows.append(row)
+
+            st.info(f"Processing {len(final_rows)} unique URLs")
+
+            # Build competitor list for selection (exclude British Gas, which is always included)
+            competitor_names = sorted(
+                {
+                    (row.get("competitor") or "").strip()
+                    for row in final_rows
+                    if row.get("competitor") and "british gas" not in row.get("competitor", "").strip().lower()
+                }
+            )
+
+            selected_competitors = []
+            if competitor_names:
+                selected_competitors = st.multiselect(
+                    "Choose competitors to scrape (British Gas will always be included):",
+                    options=competitor_names,
+                    default=competitor_names,
+                    key="competitor_multiselect",
+                )
+
             # Start scraping
             if st.button("🚀 Start Scraping", key="scrape_btn", type="primary"):
                 st.session_state.processing_complete = False
@@ -144,6 +235,30 @@ def main():
                 with st.spinner("🔄 Initializing scraper..."):
                     st.session_state.scraper_agent = ScraperAgent(api_key=ANTHROPIC_API_KEY)
                 
+                # Decide which URLs to scrape based on competitor selection
+                from urllib.parse import urlparse
+
+                def is_british_gas(row: Dict[str, Any]) -> bool:
+                    comp = (row.get("competitor") or "").lower()
+                    if "british gas" in comp:
+                        return True
+                    domain = urlparse(row["url"]).netloc.lower()
+                    return "britishgas.co.uk" in domain
+
+                urls_to_scrape = []
+                url_to_competitor = {}
+
+                for row in final_rows:
+                    url_val = row["url"]
+                    comp_name = (row.get("competitor") or "").strip()
+                    bg = is_british_gas(row)
+
+                    # Always include British Gas URLs; for others, filter by selected competitors (if any)
+                    if bg or not selected_competitors or comp_name in selected_competitors:
+                        urls_to_scrape.append(url_val)
+                        label = comp_name or ("British Gas" if bg else "")
+                        url_to_competitor[url_val] = label
+
                 # Progress tracking
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -156,8 +271,9 @@ def main():
                 # Scrape URLs
                 with st.spinner("📡 Scraping and extracting product data..."):
                     results, errors = st.session_state.scraper_agent.scrape_multiple_urls(
-                        final_urls,
-                        progress_callback=progress_callback
+                        urls_to_scrape,
+                        progress_callback=progress_callback,
+                        url_to_competitor=url_to_competitor,
                     )
                 
                 # Store results in session state
@@ -168,6 +284,55 @@ def main():
                 progress_bar.empty()
                 status_text.empty()
                 
+                st.success("✓ Scraping complete!")
+                st.rerun()
+
+        elif text_urls:
+            # Text-based workflow (no competitor metadata)
+            st.subheader("URL Validation")
+            valid_urls = [u for u in text_urls if validate_url(u)]
+            invalid_urls = [u for u in text_urls if not validate_url(u)]
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.success(f"✓ Valid URLs: {len(valid_urls)}")
+            with col2:
+                if invalid_urls:
+                    st.warning(f"⚠ Invalid URLs: {len(invalid_urls)}")
+                    with st.expander("Show invalid URLs"):
+                        for url in invalid_urls:
+                            st.text(url)
+
+            final_urls = deduplicate_urls(valid_urls)
+            st.info(f"Processing {len(final_urls)} unique URLs")
+
+            if st.button("🚀 Start Scraping", key="scrape_btn_text", type="primary"):
+                st.session_state.processing_complete = False
+
+                with st.spinner("🔄 Initializing scraper..."):
+                    st.session_state.scraper_agent = ScraperAgent(api_key=ANTHROPIC_API_KEY)
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def progress_callback(url, index, total):
+                    progress = (index + 1) / total
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processing {index + 1}/{total}: {url[:50]}...")
+
+                with st.spinner("📡 Scraping and extracting product data..."):
+                    results, errors = st.session_state.scraper_agent.scrape_multiple_urls(
+                        final_urls,
+                        progress_callback=progress_callback,
+                    )
+
+                st.session_state.extracted_products = results
+                st.session_state.extraction_errors = errors
+                st.session_state.processing_complete = True
+
+                progress_bar.empty()
+                status_text.empty()
+
                 st.success("✓ Scraping complete!")
                 st.rerun()
     
@@ -282,10 +447,10 @@ def main():
     st.markdown(
         """
         <div style='text-align: center; color: #666; margin-top: 20px;'>
-            <p>Market Price - Intelligence Platform | Yoga Manickavasakam</p>
+            <p>AI Powered Competitor Intelligence | Yoga Manickavasakam</p>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ def export_products_to_csv(products: List[Dict[str, Any]]) -> bytes:
         
         # Reorder columns for better readability
         preferred_columns = [
+            "competitor",
             "product_name",
             "price_monthly",
             "price_annual",
@@ -57,40 +58,57 @@ def export_products_to_csv(products: List[Dict[str, Any]]) -> bytes:
         logger.error(f"Error exporting to CSV: {e}")
         return b""
 
-def parse_csv_urls(uploaded_file) -> List[str]:
+def parse_csv_urls(uploaded_file) -> List[Dict[str, Any]]:
     """
-    Parse URLs from uploaded CSV file.
-    Expects a 'url' column in the CSV.
+    Parse URLs (and optional competitor names) from uploaded CSV file.
+
+    Expects a 'url' column in the CSV, and optionally a 'competitor' (or
+    'competitor_name') column. Returns a list of dicts:
+      {"url": "<url>", "competitor": "<name or None>"}
     """
     try:
         # Read the uploaded file
         stringio = io.StringIO(uploaded_file.getvalue().decode("utf8"), newline=None)
         data = pd.read_csv(stringio)
-        
+
         # Look for 'url' or 'URL' column
         url_column = None
         for col in data.columns:
             if col.lower() == "url":
                 url_column = col
                 break
-        
+
         if url_column is None:
             logger.error(f"No 'url' column found. Available columns: {list(data.columns)}")
             return []
-        
-        # Extract URLs and remove duplicates while preserving order
-        urls = []
+
+        # Optional competitor column
+        competitor_column = None
+        for col in data.columns:
+            if col.lower() in ("competitor", "competitor_name"):
+                competitor_column = col
+                break
+
+        # Extract URLs (and competitor names) and remove duplicates while preserving order
+        rows: List[Dict[str, Any]] = []
         seen = set()
-        for url in data[url_column]:
-            if pd.notna(url):
-                url_str = str(url).strip()
+
+        for _, row in data.iterrows():
+            raw_url = row.get(url_column)
+            if pd.notna(raw_url):
+                url_str = str(raw_url).strip()
                 if url_str and url_str not in seen:
-                    urls.append(url_str)
                     seen.add(url_str)
-        
-        logger.info(f"Parsed {len(urls)} URLs from CSV")
-        return urls
-    
+                    comp_name = None
+                    if competitor_column is not None:
+                        raw_comp = row.get(competitor_column)
+                        if pd.notna(raw_comp):
+                            comp_name = str(raw_comp).strip()
+                    rows.append({"url": url_str, "competitor": comp_name})
+
+        logger.info(f"Parsed {len(rows)} URL rows from CSV")
+        return rows
+
     except Exception as e:
         logger.error(f"Error parsing CSV: {e}")
         return []

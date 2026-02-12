@@ -8,8 +8,8 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 
 # App Configuration
-APP_TITLE = "Product Data Intelligence Platform"
-APP_DESCRIPTION = "Scrape and analyze product data from multiple URLs with AI-powered extraction and competitor intelligence"
+APP_TITLE = "AI Powered Competitor Intelligence"
+APP_DESCRIPTION = "Scrape, normalize and benchmark competitor products and pricing with an AI-powered intelligence workspace."
 
 # Scraping Configuration
 MAX_URLS_PER_BATCH = 50

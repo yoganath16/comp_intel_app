@@ -15,6 +15,29 @@ def _provider_from_source_url(source_url: Any) -> str:
     except Exception:
         return ""
 
+
+def _ensure_competitor_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure a 'competitor' column exists for display:
+    - Prefer existing 'competitor' field (from CSV)
+    - Fall back to domain derived from 'source_url' when missing/blank
+    """
+    if "competitor" not in df.columns:
+        if "source_url" in df.columns:
+            df["competitor"] = df["source_url"].apply(_provider_from_source_url)
+        else:
+            df["competitor"] = ""
+    else:
+        if "source_url" in df.columns:
+            df["competitor"] = df.apply(
+                lambda row: row["competitor"]
+                if isinstance(row.get("competitor"), str) and row["competitor"].strip()
+                else _provider_from_source_url(row.get("source_url")),
+                axis=1,
+            )
+    return df
+
+
 def format_products_as_dataframe(products: List[Dict[str, Any]], dedupe: bool = True) -> pd.DataFrame:
     """
     Convert products list to a nicely formatted DataFrame for display.
@@ -24,53 +47,77 @@ def format_products_as_dataframe(products: List[Dict[str, Any]], dedupe: bool = 
 
     if dedupe:
         products, _ = dedupe_products(products)
-    
+
     # Create DataFrame
     df = pd.DataFrame(products)
 
-    # Add provider column (derived from source URL domain) for easier comparisons
-    if "source_url" in df.columns and "provider" not in df.columns:
-        df.insert(0, "provider", df["source_url"].apply(_provider_from_source_url))
-    
-    # Define column order
-    preferred_columns = [
+    # Ensure competitor column exists (from CSV or URL domain)
+    df = _ensure_competitor_column(df)
+
+    # Build combined "Coverage and T&Cs" column from features + terms_conditions
+    if "features" in df.columns or "terms_conditions" in df.columns:
+        def _combine_coverage(row: Dict[str, Any]) -> str:
+            parts = []
+            feats = row.get("features")
+            if isinstance(feats, list):
+                feat_str = "\n".join(f"• {f}" for f in feats)
+                if feat_str:
+                    parts.append(feat_str)
+            elif isinstance(feats, str) and feats.strip():
+                parts.append(feats.strip())
+
+            tc = row.get("terms_conditions")
+            if isinstance(tc, str) and tc.strip():
+                parts.append(tc.strip())
+
+            return "\n\n".join(parts) if parts else ""
+
+        df["coverage_and_tcs"] = df.apply(_combine_coverage, axis=1)
+
+    # Drop internal-only / now-redundant columns we don't want to display
+    drop_cols = [
         "provider",
+        "source_url",
+        "features",
+        "terms_conditions",
+        "_provider_domain",
+        "_source_urls",
+    ]
+    existing_drop = [c for c in drop_cols if c in df.columns]
+    if existing_drop:
+        df = df.drop(columns=existing_drop)
+
+    # Define display column order (first column: provider/competitor name)
+    preferred_columns = [
+        "competitor",
         "product_name",
         "price_monthly",
         "price_annual",
         "excess",
         "special_offers",
         "category",
-        "source_url"
+        "coverage_and_tcs",
     ]
-    
+
     # Reorder columns
     existing_cols = [col for col in preferred_columns if col in df.columns]
     other_cols = [col for col in df.columns if col not in existing_cols]
     df = df[existing_cols + other_cols]
-    
-    # Format features column
-    if "features" in df.columns:
-        df["features"] = df["features"].apply(
-            lambda x: "\n".join(f"• {f}" for f in x) if isinstance(x, list) else x
-        )
-    
+
     # Rename columns for display
     column_mapping = {
-        "provider": "Provider",
+        "competitor": "Provider",
         "product_name": "Product Name",
         "price_monthly": "Monthly Price",
         "price_annual": "Annual Price",
         "excess": "Excess",
-        "features": "Features",
         "special_offers": "Special Offers",
-        "terms_conditions": "Terms & Conditions",
         "category": "Category",
-        "source_url": "Source URL"
+        "coverage_and_tcs": "Coverage and T&Cs",
     }
-    
+
     df = df.rename(columns=column_mapping)
-    
+
     return df
 
 def format_summary_statistics(stats: Dict[str, Any]) -> pd.DataFrame:
