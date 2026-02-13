@@ -15,6 +15,7 @@ from agents.competitor_intelligence import CompetitorIntelligenceAgent
 from utils.url_processor import validate_url, deduplicate_urls
 from utils.file_handler import parse_csv_urls, parse_text_urls, export_products_to_csv
 from utils.table_formatter import format_products_as_dataframe, format_summary_statistics, format_errors_as_dataframe
+from utils.report_export import export_report_to_docx
 
 # Page configuration
 st.set_page_config(
@@ -118,6 +119,10 @@ if "extraction_errors" not in st.session_state:
     st.session_state.extraction_errors = []
 if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
+if "intelligence_report" not in st.session_state:
+    st.session_state.intelligence_report = None
+if "intelligence_report_type" not in st.session_state:
+    st.session_state.intelligence_report_type = None
 
 def main():
     # Header with branding
@@ -153,6 +158,13 @@ def main():
     # TAB 1: URL UPLOAD
     with tab1:
         st.header("Upload URLs for Scraping")
+        
+        if st.session_state.processing_complete:
+            st.success(
+                "**Scraping complete.** All requested pages have been processed successfully. "
+                "Go to the **Scraping Results** tab to view the extracted products and summary."
+            )
+            st.divider()
         
         col1, col2 = st.columns(2)
         
@@ -400,19 +412,34 @@ def main():
                         report = intelligence_agent.generate_report(st.session_state.extracted_products)
                     else:
                         report = intelligence_agent.generate_summary_report(st.session_state.extracted_products)
+                    
+                    st.session_state.intelligence_report = report
+                    st.session_state.intelligence_report_type = report_type
                 
+                st.rerun()
+            
+            # Show last generated report and download options
+            if st.session_state.intelligence_report:
+                report = st.session_state.intelligence_report
                 st.success("✓ Report generated!")
                 st.markdown(report)
                 
-                # Option to download report as text
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"competitor_intelligence_{timestamp}.txt"
-                st.download_button(
-                    label="📥 Download Report as Text",
-                    data=report.encode('utf-8'),
-                    file_name=filename,
-                    mime="text/plain"
-                )
+                logo_path = "logo.svg" if os.path.exists("logo.svg") else None
+                report_title = "AI Powered Competitor Intelligence"
+                
+                st.subheader("Download report")
+                try:
+                    docx_bytes = export_report_to_docx(report, logo_path=logo_path, title=report_title)
+                    st.download_button(
+                        label="📝 Download Word (.docx)",
+                        data=docx_bytes,
+                        file_name=f"competitor_intelligence_{timestamp}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_docx",
+                    )
+                except Exception as e:
+                    st.caption(f"Word export unavailable: {e}")
     
     # TAB 4: DATA EXPORT
     with tab4:
