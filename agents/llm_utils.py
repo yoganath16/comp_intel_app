@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Optional, Dict, Any, List
 import anthropic
 import re
@@ -73,104 +74,288 @@ def _build_extraction_input(html_content: str, max_chars: int = 60000) -> str:
 
     return "\n\n<!-- SNIP -->\n\n".join(parts)
 
-def extract_product_data(html_content: str, url: str, api_key: str) -> list:
+
+def _extract_product_objects_from_text(text: str) -> list:
+    """
+    Find and parse JSON objects that contain "product_name" (e.g. when the model returns
+    malformed array or extra text). Returns list of product dicts or empty list.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        # Look for start of object that looks like product
+        idx = text.find('"product_name"', i)
+        if idx == -1:
+            break
+        # Find preceding opening brace
+        start = text.rfind("{", i, idx + 1)
+        if start == -1:
+            i = idx + 1
+            continue
+        # Find matching closing brace
+        depth = 0
+        end = -1
+        for j in range(start, n):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            i = start + 1
+            continue
+        candidate = text[start : end + 1]
+        i = end + 1
+        try:
+            repaired = re.sub(r",\s*]", "]", re.sub(r",\s*}", "}", candidate))
+            repaired = "".join(c for c in repaired if ord(c) >= 32 or c in "\n\r\t")
+            obj = json.loads(repaired)
+            if isinstance(obj, dict) and obj.get("product_name") is not None:
+                out.append(obj)
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def extract_product_data(html_content: str, url: str, api_key: str, max_retries: int = 3) -> list:
     """
     Use Claude to intelligently extract product data from HTML.
     Returns list of product dictionaries with extracted information.
+    
+    Args:
+        html_content: HTML content to analyze
+        url: Source URL for logging
+        api_key: Anthropic API key
+        max_retries: Maximum number of retries for rate limit errors
     """
     client = anthropic.Anthropic(api_key=api_key)
     
     # Build a compact but relevant input. Avoid naive prefix truncation which often drops prices.
+    # Use a generous window so deep price/excess sections (like HomeServe/HomeTree)
+    # are still included for extraction.
     html_for_analysis = _build_extraction_input(html_content, max_chars=60000)
     
     prompt = f"""You are a data extraction expert. Analyze the following HTML content from {url} and extract ALL product/service offerings.
 
-IMPORTANT: Return ONLY a valid JSON array, nothing else. No explanation, no markdown, just the JSON.
+CRITICAL: Your response must be ONLY a valid JSON array. No text before or after. No markdown code fences. No explanation. Use double quotes for keys and strings. Escape any quotes inside strings with backslash. Use null for missing values. If no products found, return exactly: []
 
-For each product/service, extract these fields:
-- product_name: (string) Name of the product/service
-- price_monthly: (string or null) Monthly price with currency symbol (e.g., "£15.50")
-- price_annual: (string or null) Annual price with currency symbol (e.g., "£186")
-- excess: (string or null) Excess/deductible amount
-- features: (array of strings) List of features/coverage areas
-- special_offers: (string or null) Promotional offers or discounts
-- terms_conditions: (string or null) Important terms or restrictions
-- category: (string) Product category/type
+Required fields per product (use null if not found):
+- product_name (string)
+- price_monthly (string with currency e.g. "£15.50" or null)
+- price_annual (string with currency or null)
+- excess (string or null)
+- features (array of strings)
+- special_offers (string or null)
+- terms_conditions (string or null)
+- category (string)
 
-Return ONLY this format:
-```json
-[
-  {{"product_name": "...", "price_monthly": "...", ...}},
-  {{"product_name": "...", "price_monthly": "...", ...}}
-]
-```
-
-If no products found, return empty array: []
+Example valid response (no other text):
+[{{"product_name": "Plan A", "price_monthly": "£10", "price_annual": "£120", "excess": "£50", "features": ["Cover 1"], "special_offers": null, "terms_conditions": null, "category": "Boiler"}}]
 
 HTML Content:
 {html_for_analysis}
 """
 
+    # Retry logic for rate limit errors
+    for attempt in range(max_retries):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=2000,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            break  # Success, exit retry loop
+        except anthropic.APIError as e:
+            # Check if it's a rate limit error (429)
+            is_rate_limit = (
+                hasattr(e, 'status_code') and e.status_code == 429
+            ) or (
+                hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429
+            ) or (
+                "rate_limit" in str(e).lower() or "429" in str(e)
+            )
+            
+            if is_rate_limit and attempt < max_retries - 1:
+                # Exponential backoff: wait 2^attempt seconds (2, 4, 8 seconds)
+                wait_time = 2 ** attempt
+                logger.warning(
+                    f"Rate limit hit for {url} (attempt {attempt + 1}/{max_retries}). "
+                    f"Waiting {wait_time}s before retry..."
+                )
+                time.sleep(wait_time)
+            else:
+                # Last attempt failed or non-rate-limit error
+                if is_rate_limit:
+                    logger.error(f"Rate limit error for {url} after {max_retries} attempts: {e}")
+                else:
+                    logger.error(f"API error while extracting data from {url}: {e}")
+                return []
+
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=2000,
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
         
         response_text = message.content[0].text or ""
 
-        # Extract JSON from response (handle markdown code blocks and minor deviations)
-        json_str = response_text
+        def _repair_json(s: str) -> str:
+            """Apply common repairs to malformed JSON."""
+            s = s.strip()
+            # Remove trailing commas before ] or }
+            s = re.sub(r",\s*]", "]", s)
+            s = re.sub(r",\s*}", "}", s)
+            # Replace unescaped newlines inside double-quoted strings (simplified: replace \n not preceded by \)
+            # Match "...." and replace literal newlines with \n
+            def fix_newlines_in_quotes(m):
+                return m.group(0).replace("\n", " ").replace("\r", " ")
+            s = re.sub(r'"(?:[^"\\]|\\.)*"', fix_newlines_in_quotes, s, flags=re.DOTALL)
+            s = re.sub(r"'(?:[^'\\]|\\.)*'", fix_newlines_in_quotes, s, flags=re.DOTALL)
+            # Strip control characters
+            s = "".join(c for c in s if ord(c) >= 32 or c in "\n\r\t")
+            return s
 
-        # Primary path: strip markdown code fences if present
-        if "```json" in json_str:
-            try:
-                json_str = json_str.split("```json", 1)[1].split("```", 1)[0]
-            except Exception:
-                pass
-        elif "```" in json_str:
-            try:
-                json_str = json_str.split("```", 1)[1].split("```", 1)[0]
-            except Exception:
-                pass
-
-        json_str = json_str.strip()
-
-        def _try_parse(s: str):
+        def _try_parse_json(s: str):
+            """Try to parse JSON string, return None if fails."""
             s = s.strip()
             if not s:
                 return None
-            return json.loads(s)
+            for candidate in (s, _repair_json(s)):
+                try:
+                    out = json.loads(candidate)
+                    if isinstance(out, list):
+                        return out
+                    if isinstance(out, dict):
+                        return [out]
+                    return None
+                except json.JSONDecodeError:
+                    continue
+            try:
+                import ast
+                value = ast.literal_eval(s)
+                if isinstance(value, list):
+                    return value
+                if isinstance(value, dict):
+                    return [value]
+                return None
+            except Exception:
+                return None
+
+        def _find_array_bounds(text: str) -> tuple:
+            """Find start/end of top-level JSON array, respecting strings. Returns (start, end) or (-1, -1)."""
+            n = len(text)
+            # First pass: find candidate "[" that are not inside a string
+            in_str = False
+            q = None
+            escape = False
+            candidates = []
+            i = 0
+            while i < n:
+                c = text[i]
+                if escape:
+                    escape = False
+                    i += 1
+                    continue
+                if in_str:
+                    if c == "\\":
+                        escape = True
+                        i += 1
+                        continue
+                    if c == q:
+                        in_str = False
+                    i += 1
+                    continue
+                if c in '"\'':
+                    in_str = True
+                    q = c
+                    i += 1
+                    continue
+                if c == "[":
+                    candidates.append(i)
+                i += 1
+            # For first candidate, run string-aware bracket match
+            for start in candidates:
+                i = start + 1
+                depth = 1
+                in_double = False
+                in_single = False
+                escape = False
+                quote_char = None
+                while i < n and depth > 0:
+                    c = text[i]
+                    if escape:
+                        escape = False
+                        i += 1
+                        continue
+                    if (in_double or in_single) and c == "\\":
+                        escape = True
+                        i += 1
+                        continue
+                    if not in_double and not in_single:
+                        if c == "[":
+                            depth += 1
+                        elif c == "]":
+                            depth -= 1
+                            if depth == 0:
+                                return (start, i)
+                        elif c == '"':
+                            in_double = True
+                            quote_char = '"'
+                        elif c == "'":
+                            in_single = True
+                            quote_char = "'"
+                    elif c == quote_char:
+                        in_double = False
+                        in_single = False
+                    i += 1
+                if depth == 0:
+                    return (start, i - 1)
+            return (-1, -1)
 
         products = None
 
-        # First attempt: direct parse
-        try:
-            products = _try_parse(json_str)
-        except json.JSONDecodeError:
-            products = None
+        # Strategy 1: Direct parse
+        products = _try_parse_json(response_text)
 
-        # Fallback: try to isolate the JSON array using bracket heuristics
+        # Strategy 2: Markdown code blocks
         if products is None:
-            try:
-                # Look for the first "[" and the last "]"
-                start = json_str.find("[")
-                end = json_str.rfind("]")
-                if start != -1 and end != -1 and end > start:
-                    bracket_slice = json_str[start : end + 1]
-                    products = _try_parse(bracket_slice)
-            except json.JSONDecodeError:
-                products = None
-            except Exception:
-                products = None
+            for marker in ["```json", "```"]:
+                if marker in response_text:
+                    try:
+                        parts = response_text.split(marker, 1)
+                        if len(parts) > 1:
+                            code_block = parts[1].split("```", 1)[0].strip()
+                            products = _try_parse_json(code_block)
+                            if products is not None:
+                                break
+                    except Exception:
+                        continue
+
+        # Strategy 3: String-aware bracket matching for [...]
+        if products is None:
+            start, end = _find_array_bounds(response_text)
+            if start != -1 and end > start:
+                json_candidate = response_text[start : end + 1]
+                products = _try_parse_json(json_candidate)
+
+        # Strategy 4: Repair and retry bracket slice
+        if products is None and "[" in response_text and "{" in response_text:
+            start, end = _find_array_bounds(response_text)
+            if start != -1 and end > start:
+                json_candidate = _repair_json(response_text[start : end + 1])
+                products = _try_parse_json(json_candidate)
+
+        # Strategy 5: Extract product-like JSON objects and merge into list (handles truncated/malformed array)
+        if products is None and '"product_name"' in response_text:
+            _extracted = _extract_product_objects_from_text(response_text)
+            if _extracted:
+                products = _extracted
 
         # If still not parsed, log and return empty list
         if products is None:
             logger.error(f"JSON decode error for {url}: unable to parse response as JSON array")
-            logger.debug(f"Response text (first 800 chars): {response_text[:800]}")
+            logger.info(f"Response sample (first 1200 chars): {response_text[:1200]!r}")
             return []
         
         if not isinstance(products, list):

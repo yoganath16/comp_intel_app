@@ -22,22 +22,42 @@ class ScraperAgent:
     def fetch_url_content(self, url: str) -> Optional[str]:
         """
         Fetch HTML content from URL using requests library.
+        Uses browser-like headers to reduce 403 blocks. Some sites block cloud/data-center IPs (e.g. when deployed on Streamlit Cloud).
         """
         try:
             logger.info(f"Fetching content from {url}")
             
-            # Use requests to fetch the URL
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-GB,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
             }
             
             response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()  # Raise exception for bad status codes
+            response.raise_for_status()
             
             html_content = response.text
             logger.info(f"Successfully fetched {url}")
             return html_content
         
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                error_msg = (
+                    f"403 Forbidden for {url}. The site may block requests from cloud/data-center IPs "
+                    "(e.g. Streamlit Cloud). Try running locally or use a URL that allows server access."
+                )
+            else:
+                error_msg = f"Failed to fetch {url}: {str(e)}"
+            logger.error(error_msg)
+            self.errors.append((url, error_msg))
+            return None
         except requests.exceptions.RequestException as e:
             error_msg = f"Failed to fetch {url}: {str(e)}"
             logger.error(error_msg)
@@ -63,8 +83,13 @@ class ScraperAgent:
                 error_msg = f"Could not fetch content from {url}"
                 return None, error_msg
             
-            # Extract product data using Claude
-            products = extract_product_data(html_content, url, self.api_key)
+            # Extract product data using Claude (with retry logic for rate limits)
+            try:
+                products = extract_product_data(html_content, url, self.api_key)
+            except Exception as e:
+                error_msg = f"Error during extraction from {url}: {str(e)}"
+                logger.error(error_msg)
+                return None, error_msg
             
             if not products:
                 error_msg = f"No products extracted from {url}"
@@ -112,8 +137,10 @@ class ScraperAgent:
             if error:
                 errors.append({"url": url, "error": error})
             
-            # Be respectful with API calls
-            time.sleep(0.5)
+            # Increased delay to avoid rate limits (30k tokens/min limit)
+            # Wait longer between requests to stay under limit
+            if index < len(urls) - 1:  # Don't wait after last URL
+                time.sleep(2.0)  # Increased from 0.5s to 2s
         
         self.extracted_data = all_results
         self.errors = errors
