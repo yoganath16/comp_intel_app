@@ -133,17 +133,18 @@ def extract_product_data(html_content: str, url: str, api_key: str, max_retries:
     """
     client = anthropic.Anthropic(api_key=api_key)
     
-    # Build a compact but relevant input. Avoid naive prefix truncation which often drops prices.
-    # Use a generous window so deep price/excess sections (like HomeServe/HomeTree)
-    # are still included for extraction.
-    html_for_analysis = _build_extraction_input(html_content, max_chars=60000)
+    # Smart extraction: includes prefix + windows around every £/$ and pricing phrase (not "first N chars").
+    # Use 60k to ensure all price blocks are captured. Rate limiting handled by delays between requests.
+    html_for_analysis = _build_extraction_input(html_content, max_chars=120000)
     
     prompt = f"""You are a data extraction expert. Analyze the following HTML content from {url} and extract ALL product/service offerings.
 
-CRITICAL: Your response must be ONLY a valid JSON array. No text before or after. No markdown code fences. No explanation. Use double quotes for keys and strings. Escape any quotes inside strings with backslash. Use null for missing values. If no products found, return exactly: []
+CRITICAL: Your response must be ONLY a valid JSON array. No text before or after. No markdown code fences. No explanation. Use double quotes for keys and strings. Escape any quotes inside strings with backslash. Use null for missing values.
+
+IMPORTANT: Look carefully for product names, prices (look for £, $, currency symbols), plan names, coverage options. Extract even partial information if full details aren't available. Only return empty array [] if you are absolutely certain there are NO products/services mentioned anywhere in the HTML.
 
 Required fields per product (use null if not found):
-- product_name (string)
+- product_name (string) - REQUIRED, extract this even if other fields are missing
 - price_monthly (string with currency e.g. "£15.50" or null)
 - price_annual (string with currency or null)
 - excess (string or null)
@@ -181,8 +182,8 @@ HTML Content:
             )
             
             if is_rate_limit and attempt < max_retries - 1:
-                # Exponential backoff: wait 2^attempt seconds (2, 4, 8 seconds)
-                wait_time = 2 ** attempt
+                # Longer backoff so rate limit window can reset (30k tokens/min)
+                wait_time = (8, 25, 60)[min(attempt, 2)]
                 logger.warning(
                     f"Rate limit hit for {url} (attempt {attempt + 1}/{max_retries}). "
                     f"Waiting {wait_time}s before retry..."
@@ -316,28 +317,65 @@ HTML Content:
         products = None
 
         # Strategy 1: Direct parse
+        logger.debug(f"Strategy 1: Trying direct parse of response (length: {len(response_text)})")
         products = _try_parse_json(response_text)
+        if products:
+            logger.debug(f"Strategy 1 SUCCESS: Found {len(products)} products")
+        else:
+            logger.debug("Strategy 1 FAILED: Direct parse returned None")
 
         # Strategy 2: Markdown code blocks
         if products is None:
+            logger.debug("Strategy 2: Trying markdown code block extraction")
             for marker in ["```json", "```"]:
                 if marker in response_text:
+                    logger.debug(f"Found markdown marker: {marker}")
                     try:
                         parts = response_text.split(marker, 1)
                         if len(parts) > 1:
                             code_block = parts[1].split("```", 1)[0].strip()
+                            # Remove "json" prefix if present (from ```json marker)
+                            if code_block.startswith("json"):
+                                code_block = code_block[4:].strip()
+                            logger.debug(f"Extracted code block (length: {len(code_block)}, first 200: {code_block[:200]})")
                             products = _try_parse_json(code_block)
                             if products is not None:
+                                logger.debug(f"Strategy 2 SUCCESS with {marker}: Found {len(products)} products")
                                 break
-                    except Exception:
+                            else:
+                                logger.debug(f"Strategy 2 FAILED with {marker}: _try_parse_json returned None, trying repair")
+                                # Try with repair
+                                repaired = _repair_json(code_block)
+                                products = _try_parse_json(repaired)
+                                if products is not None:
+                                    logger.debug(f"Strategy 2 SUCCESS with {marker} (after repair): Found {len(products)} products")
+                                    break
+                                else:
+                                    logger.debug(f"Strategy 2 FAILED with {marker} (even after repair)")
+                    except Exception as e:
+                        logger.debug(f"Strategy 2 exception with {marker}: {e}")
                         continue
 
         # Strategy 3: String-aware bracket matching for [...]
         if products is None:
+            logger.debug("Strategy 3: Trying string-aware bracket matching")
             start, end = _find_array_bounds(response_text)
             if start != -1 and end > start:
                 json_candidate = response_text[start : end + 1]
+                logger.debug(f"Found array bounds: start={start}, end={end}, length={len(json_candidate)}")
                 products = _try_parse_json(json_candidate)
+                if products:
+                    logger.debug(f"Strategy 3 SUCCESS: Found {len(products)} products")
+                else:
+                    logger.debug("Strategy 3 FAILED: _try_parse_json returned None, trying repair")
+                    repaired = _repair_json(json_candidate)
+                    products = _try_parse_json(repaired)
+                    if products:
+                        logger.debug(f"Strategy 3 SUCCESS (after repair): Found {len(products)} products")
+                    else:
+                        logger.debug("Strategy 3 FAILED: Even after repair")
+            else:
+                logger.debug(f"Strategy 3 FAILED: No array bounds found (start={start}, end={end})")
 
         # Strategy 4: Repair and retry bracket slice
         if products is None and "[" in response_text and "{" in response_text:
@@ -348,9 +386,13 @@ HTML Content:
 
         # Strategy 5: Extract product-like JSON objects and merge into list (handles truncated/malformed array)
         if products is None and '"product_name"' in response_text:
+            logger.debug("Strategy 5: Trying object extraction")
             _extracted = _extract_product_objects_from_text(response_text)
             if _extracted:
+                logger.debug(f"Strategy 5 SUCCESS: Found {len(_extracted)} products")
                 products = _extracted
+            else:
+                logger.debug("Strategy 5 FAILED: No objects extracted")
 
         # If still not parsed, log and return empty list
         if products is None:
@@ -361,8 +403,43 @@ HTML Content:
         if not isinstance(products, list):
             logger.warning(f"Response is not a list for {url}, converting to list")
             products = [products] if isinstance(products, dict) else []
-        
-        logger.info(f"Successfully extracted {len(products)} products from {url}")
+
+        if len(products) == 0:
+            logger.warning(f"No products extracted from {url} - checking if HTML contains price/product indicators...")
+            # Check if HTML actually has price/product content before retrying
+            has_prices = bool(re.search(r"[£$€]\s*\d", html_content))
+            has_product_words = bool(re.search(r"\b(product|plan|cover|premium|option)", html_content, re.IGNORECASE))
+            
+            if has_prices or has_product_words:
+                logger.info(f"HTML contains price/product indicators - retrying with focused extraction")
+                # Retry with a more focused extraction (still 50k to capture price blocks)
+                html_retry = _build_extraction_input(html_content, max_chars=50000)
+                try:
+                    prompt_retry = prompt.replace(html_for_analysis, html_retry)
+                    msg = client.messages.create(
+                        model="claude-sonnet-4-5-20250929",
+                        max_tokens=2000,
+                        messages=[{"role": "user", "content": prompt_retry}],
+                    )
+                    response_retry = (msg.content[0].text or "").strip()
+                    # Try all parsing strategies on retry response
+                    products = _try_parse_json(response_retry)
+                    if not products:
+                        start, end = _find_array_bounds(response_retry)
+                        if start != -1 and end > start:
+                            products = _try_parse_json(response_retry[start : end + 1])
+                    if not products:
+                        products = _extract_product_objects_from_text(response_retry)
+                    if products:
+                        logger.info(f"Retry extracted {len(products)} products from {url}")
+                    else:
+                        logger.warning(f"Retry also returned 0 products. Response sample: {response_retry[:800]!r}")
+                except Exception as retry_err:
+                    logger.debug(f"Retry failed: {retry_err}")
+            else:
+                logger.info(f"HTML does not appear to contain price/product content - skipping retry")
+        else:
+            logger.info(f"Successfully extracted {len(products)} products from {url}")
         return products
     
     except anthropic.APIError as e:
