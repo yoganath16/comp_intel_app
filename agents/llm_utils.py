@@ -21,6 +21,22 @@ def _build_extraction_input(html_content: str, max_chars: int = 60000) -> str:
     if not html_content:
         return ""
 
+    # Pre-process: strip content that wastes the token budget without adding useful signal.
+    # Sites like HomeServe embed large base64-encoded SVG images directly inside product cards
+    # (right next to prices). Without stripping these first, the windowing budget gets flooded
+    # with base64 garbage and never reaches the actual product/pricing text.
+    html_content = re.sub(
+        r'data:[^;"\s]{1,100};base64,[A-Za-z0-9+/=\r\n]{20,}',
+        '[image]',
+        html_content,
+    )
+    # Inline <svg> elements (icon markup) are equally noisy
+    html_content = re.sub(r'<svg[\s>].*?</svg>', '[svg]', html_content, flags=re.DOTALL | re.IGNORECASE)
+    # <style> blocks contain CSS, not product data
+    html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    # <script> blocks contain JS — __NEXT_DATA__ is already extracted upstream in scraper_agent.py
+    html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+
     # Always include a small prefix for context (title, H1, etc.)
     prefix_len = min(8000, len(html_content))
     windows: List[tuple[int, int]] = [(0, prefix_len)]
@@ -143,18 +159,25 @@ CRITICAL: Your response must be ONLY a valid JSON array. No text before or after
 
 IMPORTANT: Look carefully for product names, prices (look for £, $, currency symbols), plan names, coverage options. Extract even partial information if full details aren't available. Only return empty array [] if you are absolutely certain there are NO products/services mentioned anywhere in the HTML.
 
+Page layout hints (apply to all sites, not just HomeServe):
+- Prices may appear as "£X.XX a month" or "£X.XX per month" — capture just the currency+number as price_monthly (e.g. "£6.99")
+- Excess is a standalone currency value (e.g. "£60" or "£100") that often appears immediately before or near text like "See what's covered" — extract only the currency+number
+- Features are often listed as bullet points under headings like "Protect your home against:", "What's included:", or similar — capture each bullet as a separate array item
+- special_offers: capture notes such as "Gas Boiler Service included" along with any associated cost shown nearby (e.g. "Gas Boiler Service included at £10.50/month")
+- Do NOT merge excess into the product name; they are separate fields
+
 Required fields per product (use null if not found):
 - product_name (string) - REQUIRED, extract this even if other fields are missing
 - price_monthly (string with currency e.g. "£15.50" or null)
 - price_annual (string with currency or null)
-- excess (string or null)
-- features (array of strings)
+- excess (string with currency e.g. "£60" or null)
+- features (array of strings — each covered item as a separate entry)
 - special_offers (string or null)
 - terms_conditions (string or null)
 - category (string)
 
 Example valid response (no other text):
-[{{"product_name": "Plan A", "price_monthly": "£10", "price_annual": "£120", "excess": "£50", "features": ["Cover 1"], "special_offers": null, "terms_conditions": null, "category": "Boiler"}}]
+[{{"product_name": "Gas Boiler Cover", "price_monthly": "£6.99", "price_annual": null, "excess": "£100", "features": ["Gas boiler breakdowns", "Gas supply pipe leaks"], "special_offers": null, "terms_conditions": null, "category": "Boiler"}}]
 
 HTML Content:
 {html_for_analysis}
